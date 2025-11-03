@@ -19,15 +19,33 @@
 
 核心代码段的实现和分析如下：
 
-| **代码行** | **实现功能** | **逻辑分析与必要性** |
-| :--- | :--- | :--- |
-| `clock_set_next_event();` | 设置下一次定时器中断 | **关键步骤：** RISC-V 架构下，定时器中断是单次的。在处理完当前中断后，必须调用此函数来重置 CPU 的 `mtimecmp` 寄存器。若不设置，定时器将不再触发。此函数同时清除 `sip` 寄存器中的 STIP 位。 |
-| `extern volatile size_t ticks;` | 声明外部全局计数器 | `extern` 表明 `ticks` 变量定义在其他文件（如 `clock.c`）。`volatile` 关键字是必要的，因为它告诉编译器 `ticks` 的值可能会在程序控制流之外（即由中断服务例程）被异步修改，从而阻止编译器对该变量的读取进行激进优化。 |
-| `static int num_prints = 0;` | 静态局部变量，记录打印次数 | `static` 确保 `num_prints` 的值在每次 `interrupt_handler` 调用结束后仍然保留，实现了打印次数的持久化计数。它记录了“100 ticks”被输出的次数。 |
-| `ticks++;` | 总中断计数加一 | 简单地记录系统接收到的总时钟中断次数。 |
-| `if (ticks % TICK_NUM == 0)` | 判断是否达到 100 次中断 | `TICK_NUM` 定义为 100。该判断语句用于确定是否达到输出和增加打印计数的阈值。 |
-| `if (num_prints >= 10)` | 判断是否达到关机条件 | 当满足 10 次 “100 ticks” 的输出（即总计 1000 次中断）时，触发系统关机流程。 |
-| `sbi_shutdown();` | 调用 SBI 关机服务 | **特权操作：** 内核（S 模式）无法直接控制硬件关机。`sbi_shutdown()` 是通过 SBI 接口向底层 M 模式固件（如 OpenSBI）发出的服务调用，请求其执行关机操作。 |
+- `clock_set_next_event();`  
+  设置下一次定时器中断。  
+  RISC-V 架构下，定时器中断是单次的。在处理完当前中断后，必须调用此函数来重置 CPU 的 `mtimecmp` 寄存器。若不设置，定时器将不再触发。此函数同时清除 `sip` 寄存器中的 STIP 位。
+
+- `extern volatile size_t ticks;`  
+  声明外部全局计数器。  
+  `extern` 表明 `ticks` 变量定义在其他文件（如 `clock.c`）。`volatile` 关键字是必要的，因为它告诉编译器 `ticks` 的值可能会在程序控制流之外（即由中断服务例程）被异步修改，从而阻止编译器对该变量的读取进行激进优化。
+
+- `static int num_prints = 0;`  
+  静态局部变量，记录打印次数。  
+  `static` 确保 `num_prints` 的值在每次 `interrupt_handler` 调用结束后仍然保留，实现了打印次数的持久化计数。它记录了“100 ticks”被输出的次数。
+
+- `ticks++;`  
+  总中断计数加一。  
+  简单地记录系统接收到的总时钟中断次数。
+
+- `if (ticks % TICK_NUM == 0)`  
+  判断是否达到 100 次中断。  
+  `TICK_NUM` 定义为 100。该判断语句用于确定是否达到输出和增加打印计数的阈值。
+
+- `if (num_prints &gt;= 10)`  
+  判断是否达到关机条件。  
+  当满足 10 次 “100 ticks” 的输出（即总计 1000 次中断）时，触发系统关机流程。
+
+- `sbi_shutdown();`  
+  调用 SBI 关机服务。  
+  内核（S 模式）无法直接控制硬件关机。`sbi_shutdown()` 是通过 SBI 接口向底层 M 模式固件（如 OpenSBI）发出的服务调用，请求其执行关机操作。
 
 ### 3.代码展示
 ```C
@@ -60,26 +78,29 @@ case IRQ_S_TIMER:
 
 ## Challenge1 · 描述与理解中断流程
 
-### 1）从“异常/中断产生”到“返回原程序”的整条链路
+### 1）从“异常/中断产生”到“返回原程序”的完整流程
 
 **触发点**  
 - 异步中断：时钟、外设等发来“中断”。  
 - 同步异常：正在执行的指令出错（非法指令、访存异常），或主动 `ecall`。  
 
-**硬件自动做的事**  
-1. 把被打断处的 PC 地址记到 `sepc`。  
-2. 把“原因”写入 `scause`（最高位=1 表示中断，0 表示异常）。  
-3. 把“与异常相关的附加信息”写入 `stval`（如异常地址）。  
-4. 采用Direct模式，初始化stvec寄存器。  
+**中断处理前**  
+1. 把被打断处的 PC 地址记到 `sepc`。 （对异常来说是触发异常的指令地址，对中断来说是被打断的指令地址）
+2. 把中断或异常的类型写入 `scause`（最高位=1 表示中断，0 表示异常）。  
+3. 把“与异常相关的信息”写入 `stval`（如异常地址或相关数据）。  
+4. 将当前的中断使能状态sstatus.SIE保存到sstatus.SPIE中，并且会将sstatus.SIE清零，从而禁用 S 模式下的中断。（防止被其他中断打断）
+5. 将当前特权级（即 U 模式，值为 0）保存到sstatus.SPP中，并将当前特权级切换到 S 模式。
+6. 采用Direct模式，初始化stvec寄存器。  
    > `stvec` 在初始化时被设置到 `__alltraps`，直接指向唯一的中断处理程序入口点。  
 
-**入口汇编 `__alltraps` 做的事**  
+**入口汇编 `__alltraps`**  
 1. `SAVE_ALL`：在栈上**按固定布局**压出一个 `trapframe`结构体，把 32 个通用寄存器 + 四个 CSR（`sstatus/sepc/stval/scause`）保存好。  
 2. `mv a0, sp`：把“当前栈顶”——也就是 **`trapframe` 的地址**——放到 `a0`，a0寄存器传递参数给接下来调用的函数trap。 
 3. `jal trap`：转到 `trap.c `的 `trap(struct trapframe *tf)`，且trap函数执行完之后，会回到这里向下继续执行。
 
 **中断处理函数 `trap()` 的分发**  
-- 先看 `tf->cause` 的最高位：是中断就走 `interrupt_handler`，否则走 `exception_handler`；  
+- 先看 `tf->cause` 的最高位：是中断就走 `interrupt_handler`，否则走 `exception_handler`； 
+- intptr_t cause = (tf->cause << 1) >> 1 把 scause 的最高位（“是否为中断”的标志位）清掉，只保留原因有关位数，这样消除了最高位的1，可以直接当做正数用，直接得到原因。
 - 执行时钟中断对应的处理语句，累加计数器，设置下一次时钟中断。 
 
 **返回路径**  
@@ -219,7 +240,7 @@ trigger_ebreak();
 - 实现位置：clock.c;
 - 具体实现：`void clock_set_next_event(void) { sbi_set_timer(get_cycles() + timebase); }`。首先通过获取当前时间戳，之后通过加一个固定值(即过多长时间之后中断)得知什么时候进行中断操作。
 - 功能：设置下一次定时器中断。
-  
+
 2. get_cycles()
 - 实现位置：clock.c;
 - 具体实现:
@@ -278,7 +299,7 @@ uint64_t sbi_call(uint64_t sbi_type, uint64_t arg0, uint64_t arg1, uint64_t arg2
 - 实现功能：提供通用结构实现各种SBI服务，满足RISCV的调用约定，并切换调用模式提高权限，进行内部固件操作。当固件执行完毕后在回收权限。并通过ecall将目标时间输入到内部寄存器中，当固件计时器等于寄存器的值是执行一次中断。
 
 **即通过输入的SBI标识符提供不同的服务**。
-  
+
 #### 关机操作
 1. sbi_shutdown()
 - 实现位置：sbi.c；
@@ -286,7 +307,7 @@ uint64_t sbi_call(uint64_t sbi_type, uint64_t arg0, uint64_t arg1, uint64_t arg2
 ```C
 void sbi_shutdown(void)
 {
-	sbi_call(SBI_SHUTDOWN, 0, 0, 0); 
+    sbi_call(SBI_SHUTDOWN, 0, 0, 0); 
 }
 ```
 - 功能：输入通过sbi_call调用内核高权限操作实现关机服务。
@@ -416,7 +437,7 @@ uint64_t sbi_call(uint64_t sbi_type, uint64_t arg0, uint64_t arg1, uint64_t arg2
 3. **委托后的路由**：
     - **U 模式 $\rightarrow$ S 模式**：被委托的系统调用或异常（最常见）直接陷入 S 模式，**不经过 M 模式**。
     - **S 模式 $\rightarrow$ M 模式**：S 模式内核主动执行 `ecall` **请求固件服务**（如设置定时器、关机），特权级提升至 M 模式，由 OpenSBI 处理。
-
+    - **S 模式 $\rightarrow$ S 模式**：设备I/O完成产生的外部中断，或内核代码触发的缺页异常。如果该中断类型已被委托，则处理流程为S模式陷入到S模式，称为自陷。
 ### 流程控制特权指令
 1. **`ecall`**：
     - **作用**：**主动发起 Trap**。U Mode 执行时，用于请求 OS 服务（U $\rightarrow$ S）。S Mode 执行时，用于请求固件服务（S $\rightarrow$ M）。
@@ -578,118 +599,4 @@ uint64_t sbi_call(uint64_t sbi_type, uint64_t arg0, uint64_t arg1, uint64_t arg2
 
 3. **硬件接口（伪指令/SBI）**：
     * **`rdtime`**：读取 64 位 **`time` CSR** 的数值，表示 CPU 启动后经过的真实时钟周期数。
-    * **`sbi_set_timer(stime_value)`**：通过 SBI 调用（S $\rightarrow$ M 模式）设置 `mtimecmp` 寄存器，在 `time` 达到 `stime_value` 时触发 Supervisor Timer Interrupt (`IRQ_S_TIMER`)。
-
-#### 2. 时钟驱动程序 (`clock.c`) 的实现
-
-1. **时间获取函数 (`get_time`)**：
-    * **作用**：封装 `rdtime` 伪指令，返回当前的 64 位时钟周期数。
-    * **兼容性**：代码通过 `__riscv_xlen` 宏判断架构，分别处理 $64$ 位架构的直接读取 (`rdtime`) 和 $32$ 位架构的分步读取（通过 `rdtimeh` / `rdtime` 拼接）。
-
-2. **初始化函数 (`clock_init`)**：
-    * **使能中断**：`set_csr(sie, MIP_STIP)`，在 **`sie`** (Supervisor Interrupt Enable) CSR 中开启 **STIP** (Supervisor Timer Interrupt Pending) 位，使能时钟中断源。
-    * **设置首次事件**：调用 `clock_set_next_event()` 来触发第一个时钟中断。
-    * **初始化计数器**：`ticks = 0`。
-
-3. **设置下次中断 (`clock_set_next_event`)**：
-    * **计算**：计算下次中断的**绝对时间** = 当前时间 (`get_time()`) + 时间间隔 (`timebase = 100000`)。
-    * **调用 SBI**：`sbi_set_timer(...)`，将计算出的绝对时间传入 OpenSBI。
-
-4. **全局计数器**：
-    * **`volatile size_t ticks;`**：声明为 **`volatile`**，强制编译器不优化对该变量的访问，因为它会在中断处理程序中被修改。
-
-#### 3. 时钟中断处理程序 (`trap.c` 中的 `IRQ_S_TIMER`)
-
-**核心逻辑**：
--  **设置下一次**：`clock_set_next_event()`，**必须首先执行**，确保定时器能够持续触发。
--  **计数**：`if (++ticks % TICK_NUM == 0)`，递增 `ticks` 并检查是否达到预设的周期（$100$ 次中断，即 $1$ 秒）。
--   **周期性任务**：如果达到周期，调用 `print_ticks()` 输出信息（如 `100 ticks`）。
-
-
-### 原子操作与中断屏蔽机制
-
-#### 1. 原子操作与中断屏蔽的必要性
-
-1. **核心问题**：在操作系统内核中，对关键数据结构（如物理内存管理中的页表、空闲列表）进行修改时，如果被中断打断，可能导致数据处于不一致状态，引发竞态条件（Race Condition）。
-2. **目的**：通过在修改关键数据结构（临界区）前后**关闭和恢复中断**，确保代码块的执行具有**原子性**，即操作要么完全执行，要么完全不执行，不受中断干扰。
-3. **应用场景**：在内存分配 (`alloc_pages`) 和释放 (`free_pages`) 过程中，使用中断屏蔽来保护 `pmm_manager` 对内存状态的修改。
-
-#### 2. 中断状态的保存与恢复机制 (`sync.h`)
-
-1. **`__intr_save()` (保存并屏蔽中断)**：
-    * **逻辑**：读取 `sstatus` 寄存器，检查当前的 **SIE** (Supervisor Interrupt Enable) 位。
-    * **操作**：
-        * 如果 SIE 为 1（中断已使能），则调用 `intr_disable()`（清除 SIE）来屏蔽中断，并返回 `1`（表示中断被关闭）。
-        * 如果 SIE 为 0（中断已禁用），则直接返回 `0`。
-    * **目的**：确保临界区代码执行时中断被关闭，并**记住进入临界区前中断的状态**。
-
-2. **`__intr_restore(bool flag)` (恢复中断状态)**：
-    * **逻辑**：根据 `__intr_save()` 返回的 `flag`（保存的旧状态）决定是否恢复中断。
-    * **操作**：如果 `flag` 为 `1`，则调用 `intr_enable()`（设置 SIE）重新使能中断。
-    * **目的**：**只在进入临界区前中断是开启的情况下才重新开启中断**，避免多余的或错误的使能操作，保持原有的中断状态。
-
-#### 3. 同步宏的使用
-
-1. **宏定义**：
-    * `local_intr_save(x)`：调用 `__intr_save()` 并将返回值存储到局部变量 `x` 中。
-    * `local_intr_restore(x)`：调用 `__intr_restore(x)` 恢复中断。
-2. **使用方式（临界区保护）**：
-    ```c
-    bool intr_flag;
-    local_intr_save(intr_flag); // 1. 保存旧状态并关闭中断
-    {
-        // 临界区代码：修改 PMM 数据结构
-        page = pmm_manager->alloc_pages(n); 
-    }
-    local_intr_restore(intr_flag); // 2. 根据保存的状态恢复中断
-    ```
-
-#### 4. 宏定义中的 `do { } while (0)` 作用
-
-1. **目的**：确保宏被当作**单个语句**来处理。
-2. **问题场景**：如果没有 `do{}while(0)`，宏在 `if/else` 结构中可能导致编译错误或逻辑错误。
-    * 例如：`if (condition) local_intr_save(x); else something_else;`
-    * 如果 `local_intr_save` 宏内部包含多个语句或以分号结束，不使用 `do{}while(0)` 可能会破坏 `if/else` 的结构。
-3. **`do{}while(0)` 优势**：
-    * **安全**：无论在何种控制结构中使用宏，它都表现为一个单一的、完整的 C 语句。
-    * **强制分号**：它强制用户在宏调用后添加分号，保持了代码的一致性。
-
-
-## 重要但未涉及知识点总结
-
-### 1. 进程与线程管理 (Process and Thread Management)
-1. **进程控制块 (PCB - Process Control Block)**：
-    * **定义**：操作系统用来管理进程/线程核心信息的**数据结构**，是进程存在的唯一标志。
-    * **内容**：包含进程状态（运行、就绪、阻塞）、程序计数器（`sepc`）、CPU 寄存器（已保存在 `trapframe` 或 PCB 内）、调度信息、内存管理信息（页表基地址 `satp`）、文件句柄等。
-2. **完整的上下文切换 (Context Switch)**：
-    * **区别于陷阱保存**：与 Trap 时硬件和汇编保存的上下文 (`trapframe`) 不同，完整的上下文切换是内核在**进程/线程之间**进行的**主动或被动切换**。
-    * **操作**：保存当前进程的 PCB，并加载下一个待运行进程的 PCB。这涉及切换**内核栈**、切换**页表基址**（`satp`），以及恢复该进程的通用寄存器。
-3. **调度器 (Scheduler)**：
-    * **作用**：决策下一个应该运行哪个进程/线程的内核模块。
-    * **触发**：主要由**时钟中断**（用于时间片轮转/抢占式调度）和**I/O等待/系统调用**（用于非抢占式调度）触发。
-
-### 2. 虚拟内存高级机制 (Advanced Virtual Memory)
-1. **地址空间布局 (Address Space Layout)**：
-    * **设计**：规划内核空间和用户空间的虚拟地址范围。在 Sv39 模式下，如何利用 $39$ 位虚拟地址，并将高位地址用于内核映射（高位地址）和用户映射（低位地址）。
-2. **页表管理与多级页表 (Paging Implementation)**：
-    * **Sv39 实现**：具体实现三级页表的创建、查找和修改机制。包括如何分配物理页来存放页表，以及如何构造页表项（PTE）来实现虚拟地址到物理地址的映射。
-    * **`satp` 寄存器**：具体使用该寄存器来切换进程的虚拟地址空间。
-3. **缺页异常处理 (Page Fault Handling)**：
-    * **触发**：当程序访问的虚拟地址在页表中找不到有效映射时，会触发 `CAUSE_FAULT_LOAD/STORE/FETCH` 异常。
-    * **处理**：内核的 `exception_handler` 必须处理此异常，根据 `stval`（记录了导致错误的地址），判断是**合法缺页**（如延迟分配内存、写时复制、页面换入）还是**非法访问**（杀掉进程）。
-
-### 3. 高级并发与同步 (Advanced Concurrency and Synchronization)
-1. **互斥锁 (Mutex)**：
-    * **必要性**：虽然中断屏蔽可以保护临界区，但在多核（多 Hart）环境中，仅屏蔽本核的中断无法阻止其他核心访问共享资源。Mutex 提供了跨核心的互斥访问。
-    * **实现基础**：利用 RISC-V 的原子指令（如 `AMO` 内存操作指令），实现 `lock()` 和 `unlock()` 操作。
-2. **信号量 (Semaphore)**：
-    * **作用**：用于控制对共享资源的访问数量，或实现复杂的进程间同步和通知机制。
-3. **死锁 (Deadlock) 与活锁 (Livelock)**：
-    * **检测与避免**：实现检测机制（如资源分配图）和避免策略（如银行家算法），确保系统并发操作的安全性。
-
-### 4. 设备驱动与 I/O 管理 (Device Driver and I/O)
-1. **外部中断处理 (External Interrupts)**：
-    * **机制**：处理来自外部设备（如网卡、磁盘、键盘）的 `IRQ_S_EXT` 中断。
-    * **任务**：通常需要识别中断源、读取设备状态、唤醒等待 I/O 完成的进程/线程。
-2. **设备驱动程序 (Device Drivers)**：
-    * **作用**：负责内核与特定硬件设备之间的通信，将硬件操作抽象为统一的软件接口供内核其他部分使用。
+    * **`sbi_set_timer(stime_value)`**：通过 SBI 调用（S $\rightarrow$ M 模式）
