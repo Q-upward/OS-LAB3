@@ -87,7 +87,6 @@ case IRQ_S_TIMER:
 2. `RESTORE_ALL`：按**和保存时对称的顺序**把寄存器与关键 CSR（`sstatus/sepc`）恢复；  
 3. 执行 `sret`：根据sstatus.SPP的值（此时为 0）切换回 U 模式;把 `sepc` 的值赋给 `pc`，并跳转回用户程序（sepc指向的地址）继续执行。
 
----
 
 ### 2）`mv a0, sp` 的目的（为什么要把 `sp` 赋给 `a0`）
 
@@ -95,7 +94,6 @@ case IRQ_S_TIMER:
 - 在 `SAVE_ALL` 之后，**`sp` 正好指向我们刚压好的 `trapframe`** 结构体。  
 - 把 `sp` 传给 `a0`，就是把“这块 `trapframe` 的地址”传给 C 函数 `trap(struct trapframe *tf)`，方便 C 代码直接通过 `tf->...` 访问/修改保存的上下文（比如 `tf->epc`、`tf->cause` 等），实现“谁触发、怎么处置、返回到哪”。
 
----
 
 ### 3）`SAVE_ALL` 中“寄存器在栈中的位置”是谁确定的
 
@@ -111,7 +109,7 @@ case IRQ_S_TIMER:
   };
 - 先保存原先的栈顶指针到sscratch，然后让栈顶指针向低地址空间延伸 36个寄存器的空间，可以放下一个trapFrame结构体。
 
----
+
 ### 4）是否“所有中断都必须在 `__alltraps` 保存全部寄存器”？
 
 **否**： 
@@ -137,7 +135,7 @@ case IRQ_S_TIMER:
   - RISCV不能直接从CSR写到内存, 需要csrr把CSR读取到通用寄存器，再从通用寄存器STORE到内存，所以目的是能trapFrame里保存分配36个REGBYTES之前的sp。
 
 
----
+
 
 ### 2）`SAVE_ALL` 里保存了 `stval / scause` 等 CSR，为什么 `RESTORE_ALL` 又不把它们恢复？保存的意义何在？
 - **不恢复的原因：**
