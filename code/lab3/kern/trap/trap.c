@@ -190,28 +190,33 @@ void interrupt_handler(struct trapframe *tf) {
 // 【异常处理函数】
 void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
-        // 2311383留:这些case后跟的值都定义在riscv.h文件下
-        // 看完这条注释可以把它删了
         case CAUSE_MISALIGNED_FETCH:
             break;
         case CAUSE_FAULT_FETCH:
             break;
         case CAUSE_ILLEGAL_INSTRUCTION:
              // 非法指令异常处理
-             /* LAB3 CHALLENGE3   YOUR CODE :  */
+             /* LAB3 CHALLENGE3   YOUR CODE :2310421  */
              /*(1)输出指令异常类型（ Illegal instruction）
               *(2)输出异常指令地址
               *(3)更新 tf->epc寄存器
               */
-             break;
+            cprintf("Exception type: Illegal instruction\n");
+            cprintf("Illegal instruction caught at 0x%lx\n", tf->epc);
+            tf->epc += 4;
+            break;
+
         case CAUSE_BREAKPOINT:
              //断点异常处理
-             /* LAB3 CHALLLENGE3   YOUR CODE :  */
+             /* LAB3 CHALLLENGE3   YOUR CODE : 2312103 */
              /*(1)输出指令异常类型（ breakpoint）
               *(2)输出异常指令地址
               *(3)更新 tf->epc寄存器
               */
-             break;
+            cprintf("Exception type: breakpoint\n");
+            cprintf("ebreak caught at 0x%lx\n", tf->epc);
+            tf->epc += 4;
+            break;
         case CAUSE_MISALIGNED_LOAD:
             break;
         case CAUSE_FAULT_LOAD:
@@ -255,3 +260,4 @@ void trap(struct trapframe *tf) {
     // dispatch based on what type of trap occurred
     trap_dispatch(tf);
 }
+
