@@ -58,11 +58,157 @@ case IRQ_S_TIMER:
 
 <img src="./picture/第一题结果.png" >
 
-## Challenge1:
+## Challenge1 · 描述与理解中断流程
 
-## Challenge2:
+### 1）从“异常/中断产生”到“返回原程序”的整条链路
+
+**触发点**  
+- 异步中断：时钟、外设等发来“中断”。  
+- 同步异常：正在执行的指令出错（非法指令、访存异常），或主动 `ecall`。  
+
+**硬件自动做的事**  
+1. 把被打断处的 PC 地址记到 `sepc`。  
+2. 把“原因”写入 `scause`（最高位=1 表示中断，0 表示异常）。  
+3. 把“与异常相关的附加信息”写入 `stval`（如异常地址）。  
+4. 采用Direct模式，初始化stvec寄存器。  
+   > `stvec` 在初始化时被设置到 `__alltraps`，直接指向唯一的中断处理程序入口点。  
+
+**入口汇编 `__alltraps` 做的事**  
+1. `SAVE_ALL`：在栈上**按固定布局**压出一个 `trapframe`结构体，把 32 个通用寄存器 + 四个 CSR（`sstatus/sepc/stval/scause`）保存好。  
+2. `mv a0, sp`：把“当前栈顶”——也就是 **`trapframe` 的地址**——放到 `a0`，a0寄存器传递参数给接下来调用的函数trap。 
+3. `jal trap`：转到 `trap.c `的 `trap(struct trapframe *tf)`，且trap函数执行完之后，会回到这里向下继续执行。
+
+**中断处理函数 `trap()` 的分发**  
+- 先看 `tf->cause` 的最高位：是中断就走 `interrupt_handler`，否则走 `exception_handler`；  
+- 执行时钟中断对应的处理语句，累加计数器，设置下一次时钟中断。 
+
+**返回路径**  
+1. 从`trap.c `返回后，回到汇编的 `__trapret`；  
+2. `RESTORE_ALL`：按**和保存时对称的顺序**把寄存器与关键 CSR（`sstatus/sepc`）恢复；  
+3. 执行 `sret`：根据sstatus.SPP的值（此时为 0）切换回 U 模式;把 `sepc` 的值赋给 `pc`，并跳转回用户程序（sepc指向的地址）继续执行。
+
+---
+
+### 2）`mv a0, sp` 的目的（为什么要把 `sp` 赋给 `a0`）
+
+- RISC-V 约定：**函数第 1 个参数**放在 `a0`寄存器。  
+- 在 `SAVE_ALL` 之后，**`sp` 正好指向我们刚压好的 `trapframe`** 结构体。  
+- 把 `sp` 传给 `a0`，就是把“这块 `trapframe` 的地址”传给 C 函数 `trap(struct trapframe *tf)`，方便 C 代码直接通过 `tf->...` 访问/修改保存的上下文（比如 `tf->epc`、`tf->cause` 等），实现“谁触发、怎么处置、返回到哪”。
+
+---
+
+### 3）`SAVE_ALL` 中“寄存器在栈中的位置”是谁确定的
+
+- **结构体决定布局**：我们定义了
+
+  ```c
+  struct trapframe {
+      struct pushregs gpr;   // 32 个通用寄存器（含 x0..x31 的影子位）
+      uintptr_t status;      // sstatus
+      uintptr_t epc;         // sepc
+      uintptr_t badvaddr;    // stval/sbadaddr
+      uintptr_t cause;       // scause
+  };
+- 先保存原先的栈顶指针到sscratch，然后让栈顶指针向低地址空间延伸 36个寄存器的空间，可以放下一个trapFrame结构体。
+
+---
+### 4）是否“所有中断都必须在 `__alltraps` 保存全部寄存器”？
+
+**否**： 
+
+- **为什么“不是必须”**：  
+  理论上，如果能 100% 保证某些寄存器不会在处理过程中被修改，就可以只保存“会被破坏的那些”。很多高性能内核会做这种“最小保存集”优化。  
+
+- **为什么“本实验选择全保存”**：  
+  1. 进入`trap.c ` 函数后，调用约定会自由使用 `caller-saved`（t/a 寄存器），还可能调用更多函数；  
+  2. 统一格式的 `trapframe` 方便调试与扩展（比如后面做进程切换、信号处理、嵌套中断）；  
+  3. 可读性与正确性优先，性能影响可忽略。  
+
+## Challenge2：理解上下文切换机制
+
+### 1）`csrw sscratch, sp`；`csrrw s0, sscratch, x0` 实现了什么操作，目的是什么？
+- **第一条：`csrw sscratch, sp`**
+  - 保存原先的栈顶指针到sscratch。
+  - 目的是**临时把“旧 sp”存起来**，因为后续会让栈顶指针向低地址空间延伸。
+
+- **第二条：`csrrw s0, sscratch, x0`**
+  - “**读取** `sscratch` 的值到 `s0`，同时把 **x0（常数 0）写回到 `sscratch`**”。
+  - `s0` 里拿到了“**原先的栈顶指针sp**”，`sscratch` 被清 0。
+  - RISCV不能直接从CSR写到内存, 需要csrr把CSR读取到通用寄存器，再从通用寄存器STORE到内存，所以目的是能trapFrame里保存分配36个REGBYTES之前的sp。
+
+
+---
+
+### 2）`SAVE_ALL` 里保存了 `stval / scause` 等 CSR，为什么 `RESTORE_ALL` 又不把它们恢复？保存的意义何在？
+- **不恢复的原因：**
+  1. **它们并不影响后续程序运行：**  
+     - `scause`：记录这次 trap 的“类型+原因码”（最高位是中断/异常标志）。  
+     - `stval`：记录与异常相关的“附加值”（比如出错地址、非法指令内容等）。  
+     - 这些都只是**给处理程序参考**用的。**下一次 trap 硬件会重新写**，我们“是否恢复”它们并不改变返回后的程序执行。
+  2. **真正影响的只有少数 CSR**：  
+     - **`sepc`**：保存了被中断指令的虚拟地址，必须按需要修改（如 `ecall` 要 `+4`），并在返回前写回。  
+     - **`sstatus`**：里的 `SPP/SPIE/SIE` 等位决定**回 U 还是回 S、中断的使能状态**，也必须恢复。  
+     - 所以 `RESTORE_ALL` 只写回 **`sepc` 和 `sstatus`** 就够了。
+
+- **保存它们的意义：**
+  1. **给 C 函数端判断与处理用**  
+     - `trap()` 里靠 `tf->cause` 判断是中断还是异常、是哪一类（例如 `S-timer`、`ecall`、缺页等）；  
+     - 缺页/访存异常要用 `stval`定位故障地址；  
+     - 非法指令/断点要打印出错点并决定是否跳过或终止。
+  2. **便于调试与日志**  
+     - `print_trapframe(tf)` 一次性把**触发点/原因/相关值**都打出来，定位问题更加直观。
+
 
 ## Challenge3:
+
+**编程实现部分：**
+```c
+case CAUSE_ILLEGAL_INSTRUCTION:
+    cprintf("Illegal instruction caught at 0x%lx\n", tf->epc);
+    cprintf("Exception type: Illegal instruction\n");
+    tf->epc += next_inst_len(tf->epc);
+    break;
+
+case CAUSE_BREAKPOINT:
+    cprintf("ebreak caught at 0x%lx\n", tf->epc);
+    cprintf("Exception type: breakpoint\n");
+    tf->epc += next_inst_len(tf->epc);
+    break;
+```
+
+**解释：**  
+`cprintf("Illegal instruction caught at 0x%lx\n", tf->epc);`  
+打印异常触发地址。tf->epc 是陷入时 CSR sepc 的值，即出错那条指令的地址；%lx 按无符号长整型十六进制输出。  
+`cprintf("Exception type: Illegal instruction\n");`  
+打印异常类型说明。  
+`tf->epc += next_inst_len(tf->epc);`  
+把返回地址推进到下一条指令，避免回去再次执行同一条非法指令而无限陷入。  
+后面的代码与上面类似，也是打印断点指令的地址和异常类型说明，同样把 sepc 前移到下一条指令。
+
+```c
+static inline void trigger_illegal(void) {
+    // 32 位“无效指令”，同步异常：CAUSE_ILLEGAL_INSTRUCTION
+    asm volatile(".word 0x00000000");
+}
+static inline void trigger_ebreak(void) {
+    // 同步异常：CAUSE_BREAKPOINT
+    asm volatile("ebreak");
+}
+```
+
+**解释：**  
+定义两个内联函数，上面的代码用到了.word 0x00000000指令，意思是把 32 位字面量 0x00000000 直接当作指令字写到程序里。这不是合法的 RISC-V 指令编码，执行到它会触发非法指令异常（scause=2），于是跳进我们写的 CAUSE_ILLEGAL_INSTRUCTION 分支。下面的代码用了 RISC-V 指令 ebreak，执行到它会触发断点异常（scause=3），进入我们的 CAUSE_BREAKPOINT 分支。
+
+```c
+trigger_illegal();   
+trigger_ebreak();   
+```
+
+**解释：**  
+最后调用这两个内联函数，就可以在打印中看到两个异常的有关信息了。
+
+**实验结果：**  
+![实验截图：异常处理输出](picture/第二题结果.png)
 
 ## 重要知识点:
 
